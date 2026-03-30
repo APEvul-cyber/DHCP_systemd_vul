@@ -1,0 +1,153 @@
+**Threat Model:**
+
+- **Attack Assumption:**
+  - Environment: Standard enterprise LAN/WLAN where endpoints obtain network configuration via DHCP (per RFC 2131). Typical clients: Windows, Linux (dhclient/NetworkManager/systemd-networkd), macOS, etc.
+  - DHCP behavior:
+    - Clients periodically renew/rebind their leases as per RFC 2131 §4.3.2–4.4.
+    - During REBINDING, clients broadcast a DHCPREQUEST that “any server may respond to with a DHCPACK” (RFC 2131 §4.3.2).
+    - Configuration options (including DNS and domain search list) are provided by the server and applied by the client only once it accepts a DHCPACK (RFC 2131 §3.1, §4.4.1; RFC 2132/RFC 3397 for options).
+  - Network controls: No DHCP snooping / DHCP guard / NAC controls blocking rogue DHCP servers. L2 domain shared between attacker and victim, so attacker sees broadcast DHCP traffic.
+  - Clients implement RFC 3397 (Option 119 “Domain Search List”) and use the received list to construct search paths for name resolution (common in modern OS resolvers and in systemd-resolved, dhclient, dnsmasq, etc.).
+
+- **Attacker Capability:**
+  - The attacker is restricted to only send one DHCP message (of type DHCPACK) and passively receive any corresponding responses.
+  - The attacker can observe broadcast DHCPREQUEST packets from the victim (e.g., during the REBINDING phase) to learn transaction ID (xid), client hardware address, and client IP, but cannot inject additional packets beyond the single DHCPACK.
+
+---
+
+**Attack Procedure:**
+
+1. **Observe a DHCPREQUEST in REBINDING:**
+   - The victim client, with an already-assigned IP, enters REBINDING (RFC 2131 §4.3.2) and broadcasts a DHCPREQUEST:
+     - Includes:
+       - `xid` (transaction ID).
+       - `ciaddr` = its current IP address.
+       - `chaddr` = its MAC address.
+     - It may not specify a particular server identifier; any server on the segment is allowed to respond with DHCPACK.
+
+2. **Construct a single malicious DHCPACK:**
+   - Using the observed parameters from the DHCPREQUEST, the attacker crafts one DHCPACK that appears to be a valid reply:
+     - Header fields:
+       - `op = 2` (BOOTREPLY).
+       - `xid` = copied from victim’s DHCPREQUEST.
+       - `ciaddr` / `yiaddr` = victim’s current IP address (to avoid surprising the client).
+       - `chaddr` = victim’s MAC address.
+     - Options (RFC 2132, RFC 3397):
+       - Option 53 (DHCP Message Type) = DHCPACK.
+       - Option 54 (Server Identifier) = attacker-controlled IP (any plausible address).
+       - Option 51 (IP Address Lease Time) = reasonable value (e.g., 1 day).
+       - Option 1 (Subnet Mask), 3 (Router), 6 (DNS), 15 (Domain Name) set to values that look legitimate or match the current network to avoid suspicion/disruption.
+       - **Option 119 (Domain Search List)** = malicious domain search suffix list, e.g.:
+         - `["corp.evil.com", "evil.internal"]`
+       - Option 255 (End).
+   - Option 119 is encoded according to RFC 3397, but for attack purposes, the critical aspect is that it introduces attacker-controlled search domains that will be appended to bare/short hostnames.
+
+3. **Send the single DHCPACK and win the race:**
+   - The attacker transmits this single DHCPACK as a broadcast (or unicast if appropriate) immediately after observing the victim’s DHCPREQUEST.
+   - Common DHCP client behavior:
+     - The first valid DHCPACK with matching `xid`/`chaddr` is accepted.
+     - Subsequent DHCPACKs for the same transaction are ignored.
+   - If the attacker’s ACK arrives first or the legitimate server is slow/unreachable, the victim accepts the attacker’s configuration.
+
+4. **Client applies the malicious Domain Search List (Option 119):**
+   - Per RFC 2131 §3.1 and §4.4.1, the client applies configuration parameters from the DHCPACK.
+   - Implementations that support Option 119 (RFC 3397) feed the search list into the system resolver configuration:
+     - On Linux, this typically appears in `/etc/resolv.conf` or equivalent (via dhclient, NetworkManager, systemd-resolved).
+     - On other OSes, the resolver library uses the DHCP-provided search list internally.
+   - The new search list remains in effect until:
+     - The lease expires or is renewed with different options, or
+     - The client moves to another network/gets a new lease.
+   - This persistence clearly outlives the one DHCP exchange.
+
+5. **Security impact / exploitation:**
+   - Any single-label or relative hostname resolution now follows the attacker’s search list:
+     - For example, when the victim application resolves `https://intranet/`, the resolver may query:
+       - `intranet.corp.evil.com`
+       - `intranet.evil.internal`
+       - before (or instead of) the legitimate internal domain.
+   - If the attacker controls `corp.evil.com` (and its DNS), he can:
+     - Serve records that mimic internal hosts (e.g., `intranet.corp.evil.com` pointing to attacker IP).
+     - Capture HTTP(S)/SMB/LDAP traffic for misconfigured or non-validated connections.
+     - Exploit applications that perform hostname-based access control but fail to validate the full FQDN.
+   - This constitutes a **direct, attacker-controlled change to the victim’s name-resolution behavior**, with potential for traffic interception, phishing, or privilege escalation in systems that rely on “short name” semantics.
+
+6. **Observable success criteria:**
+   - On the victim:
+     - Resolver configuration shows the malicious search domains (e.g., `search corp.evil.com evil.internal`).
+   - On the network:
+     - DNS queries from the victim for names like `host.corp.evil.com` that would not exist without the malicious Option 119.
+   - The behavior persists across application launches and network activity for the lifetime of the DHCP lease.
+
+---
+
+**Attack Message:**
+
+```json
+{
+  "dhcp_header": {
+    "op": 2,
+    "htype": 1,
+    "hlen": 6,
+    "hops": 0,
+    "xid": "0x3903F326",
+    "secs": 0,
+    "flags": "0x8000",
+    "ciaddr": "192.0.2.100",
+    "yiaddr": "192.0.2.100",
+    "siaddr": "0.0.0.0",
+    "giaddr": "0.0.0.0",
+    "chaddr": "00:11:22:33:44:55"
+  },
+  "options": [
+    {
+      "code": 53,
+      "name": "DHCP Message Type",
+      "value": "DHCPACK"
+    },
+    {
+      "code": 54,
+      "name": "Server Identifier",
+      "value": "192.0.2.200"
+    },
+    {
+      "code": 51,
+      "name": "IP Address Lease Time",
+      "value": 86400
+    },
+    {
+      "code": 1,
+      "name": "Subnet Mask",
+      "value": "255.255.255.0"
+    },
+    {
+      "code": 3,
+      "name": "Router",
+      "value": ["192.0.2.1"]
+    },
+    {
+      "code": 6,
+      "name": "Domain Name Server",
+      "value": ["198.51.100.53"]
+    },
+    {
+      "code": 15,
+      "name": "Domain Name",
+      "value": "victim.local"
+    },
+    {
+      "code": 119,
+      "name": "Domain Search List",
+      "value": ["corp.evil.com", "evil.internal"]
+    },
+    {
+      "code": 255,
+      "name": "End",
+      "value": null
+    }
+  ]
+}
+```
+
+This single DHCPACK, when accepted by a standard-compliant client, causes the victim to adopt the attacker-controlled domain search list in Option 119, altering security-relevant name resolution behavior for the duration of the lease.
+
+**Classification:** ATTACK

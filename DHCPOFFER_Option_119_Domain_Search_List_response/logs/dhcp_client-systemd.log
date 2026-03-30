@@ -1,0 +1,17 @@
+pgrep: pattern that searches for process name longer than 15 characters will result in zero matches
+Try `pgrep -f' option to match against the complete command line.
+Directory "/run/systemd/netif" already exists, but has mode 0777 that is too permissive (0755 was requested), refusing.
+Could not create runtime directory: File exists
+Directory "/run/systemd/netif/links" already exists, but has mode 0777 that is too permissive (0755 was requested), refusing.
+Could not create runtime directory 'links': File exists
+Directory "/run/systemd/netif/leases" already exists, but has mode 0777 that is too permissive (0755 was requested), refusing.
+Could not create runtime directory 'leases': File exists
+Directory "/run/systemd/netif/lldp" already exists, but has mode 0777 that is too permissive (0755 was requested), refusing.
+Could not create runtime directory 'lldp': File exists
+lo: Link UP
+lo: Gained carrier
+eth0: Link UP
+eth0: Gained carrier
+eth0: Configuring with /etc/systemd/network/10-dhcp.network.
+Enumeration completed
+eth0: DHCPv4 address 10.100.0.52/24, gateway 10.100.0.1 acquired from 10.100.0.2

@@ -1,7 +1,13 @@
-# networkd applies DHCP Option 119 with no pin
+# DHCP Option 119 must not silently override pinned search domains
 
-RFC 3397 search domains from a rogue DHCPACK are stored and given to systemd-resolved. DNS server (Option 6) can stay legit.
+Rogue DHCPACK with Option 119 (Option 6 left legit) makes systemd-resolved append attacker suffixes to short names.
 
-This is unauthenticated DHCP, same class as CVE-2024-3661 (Option 121). A `Domains=` pin that ignores DHCP search would be the hardening.
+Same trust failure as TunnelVision / Option 121.
 
-PoC: `rogue_dns_search.py`.
+## Reproduce
+
+`rogue_dns_search.py`.
+
+**Expected:** `UseDomains=no` or a pin that DHCP cannot replace.
+
+https://github.com/APEvul-cyber/DHCP_systemd_vul/tree/main/option-119-search
